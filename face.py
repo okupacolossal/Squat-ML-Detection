@@ -241,6 +241,8 @@ while cap.isOpened():
         cap.release()
         cap = cv2.VideoCapture(videos[playingindex])
 
+    
+
 # ---------------------------
 # Cleanup
 # ---------------------------
