@@ -12,6 +12,11 @@ videolist = os.listdir(listpath)
 videos = []
 playingindex = 0
 
+reps = {}
+reps_number = 0
+
+
+
 for i in videolist:
     fullvideo = os.path.join(listpath, i)
     videos.append(fullvideo)
@@ -45,6 +50,36 @@ def drawvisibility(frame, landmark, result, w, h, name):
     x, y = int(lm.x * w), int(lm.y * h)
     cv2.circle(frame, (x, y), 5, (0, 0, 0), -1, lineType=cv2.LINE_AA)
 
+def getLandmarks():
+    return {
+            'LFOOT': mp_pose.PoseLandmark.LEFT_FOOT_INDEX.value,
+            'RFOOT': mp_pose.PoseLandmark.RIGHT_FOOT_INDEX.value,
+            'LHEEL': mp_pose.PoseLandmark.LEFT_HEEL.value,
+            'RHEEL': mp_pose.PoseLandmark.RIGHT_HEEL.value,
+            'LANKLE': mp_pose.PoseLandmark.LEFT_ANKLE.value,
+            'RANKLE': mp_pose.PoseLandmark.RIGHT_ANKLE.value,
+
+            # Knees
+            'LKNEE': mp_pose.PoseLandmark.LEFT_KNEE.value,
+            'RKNEE': mp_pose.PoseLandmark.RIGHT_KNEE.value,
+
+            # Hips / pelvis
+            'LHIP': mp_pose.PoseLandmark.LEFT_HIP.value,
+            'RHIP': mp_pose.PoseLandmark.RIGHT_HIP.value,
+
+            # Shoulders
+            'LSHOULDER': mp_pose.PoseLandmark.LEFT_SHOULDER.value,
+            'RSHOULDER': mp_pose.PoseLandmark.RIGHT_SHOULDER.value,
+
+            # Head / alignment
+            'LEAR': mp_pose.PoseLandmark.LEFT_EAR.value,
+            'REAR': mp_pose.PoseLandmark.RIGHT_EAR.value,
+            'NOSE': mp_pose.PoseLandmark.NOSE.value,
+
+            # Wrists (optional)
+            'LWRIST': mp_pose.PoseLandmark.LEFT_WRIST.value,
+            'RWRIST': mp_pose.PoseLandmark.RIGHT_WRIST.value
+    }
 
 def draw_skeleton(frame, lm2d, w, h):
     # Define connections (pairs of landmarks)
@@ -89,7 +124,6 @@ def draw_skeleton(frame, lm2d, w, h):
         # Draw smooth anti-aliased line
         cv2.line(frame, (x1, y1), (x2, y2), (255, 255, 255), 3, lineType=cv2.LINE_AA)
 
-
 def calculateangle3p(mainpoint, point1, point2, lm):
     
     mainpoint, point1, point2 = lm[mainpoint], lm[point1], lm[point2]
@@ -116,17 +150,57 @@ def calculateangle3p(mainpoint, point1, point2, lm):
 
     return flexion
 
-
 def drawAssignAngles(point, angle, frame, marks):
     x, y  = int(marks[point].x * w), int(marks[point].y * h)
     cv2.putText(frame, f'{int(angle)}', (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 4, cv2.LINE_AA)
     cv2.putText(frame, f'{int(angle)}', (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2, cv2.LINE_AA)
 
+def torsoLogic(neededLandmarks):
+    torso_vector_x = lm[neededLandmarks['RSHOULDER']].x - lm[neededLandmarks['RHIP']].x
+    torso_vector_y = lm[neededLandmarks['RSHOULDER']].y - lm[neededLandmarks['RHIP']].y
+    torso_vector_z = lm[neededLandmarks['RSHOULDER']].z - lm[neededLandmarks['RHIP']].z
+    torsov = np.array([torso_vector_x, torso_vector_y, torso_vector_z])
+    torsomagnitude = np.linalg.norm(torsov)
+    torso_normalize = torsov / torsomagnitude
+    torsoup_vector = np.array([0, -1, 0])
+    torsoalignment = np.dot(torso_normalize, torsoup_vector)    
+    torsoangle = int((math.acos(torsoalignment) * (180 / math.pi)))
+    torsox = (((lm2d[neededLandmarks['RSHOULDER']].x + (lm2d[neededLandmarks['LSHOULDER']].x)) / 2) * w)
+    torsoy = (((lm2d[neededLandmarks['RSHOULDER']].y + (lm2d[neededLandmarks['LSHOULDER']].y)) / 2) * h)
+    return torsoangle, (torsox, torsoy)
+
+def CalculateAngles():
+    CalculatePoints = {
+        'L_KNEE': (neededLandmarks['LKNEE'], neededLandmarks['LHIP'], neededLandmarks['LANKLE']),
+        'R_KNEE': (neededLandmarks['RKNEE'], neededLandmarks['RHIP'], neededLandmarks['RANKLE']),
+        'L_DORSIFLEX': (neededLandmarks['LANKLE'], neededLandmarks['LFOOT'], neededLandmarks['LKNEE']),
+        'R_DORSIFLEX': (neededLandmarks['RANKLE'], neededLandmarks['RFOOT'], neededLandmarks['RKNEE']),
+        'L_HIP': (neededLandmarks['LHIP'], neededLandmarks['LSHOULDER'], neededLandmarks['LKNEE']),
+        'R_HIP': (neededLandmarks['RHIP'], neededLandmarks['RSHOULDER'], neededLandmarks['RKNEE']),
+    }
+    Angles = {}
+    for key, point in CalculatePoints.items():
+        angle = int(calculateangle3p((point[0]), point[1], point[2], lm))
+        Angles[key] = angle, point[0]
+
+        if key == 'L_DORSIFLEX':
+            Angles[key] = abs(angle - 90), point[0]
+        if key == 'R_DORSIFLEX':
+            Angles[key] = abs(angle - 90), point[0]
+        
+    Angles['TORSO'] = torsoLogic()
+    
+    justAngles = {}
+    for key, (angle, point) in Angles.items():
+        drawAssignAngles(point, angle, frame, lm2d)
+        justAngles[key] = angle
+    return justAngles
+    
 # ---------------------------
 # Main loop
 # ---------------------------
 last_bodyresult = None
-print('hello')
+
 while cap.isOpened():
     ret, frame = cap.read()
     #frame = cv2.resize(frame, (900, 600))
@@ -150,84 +224,22 @@ while cap.isOpened():
         draw_skeleton(frame, lm2d, w, h)
 
         # Draw visible landmark dots
-        neededLandmarks = {
-            # Feet and ankles
-            'LFOOT': mp_pose.PoseLandmark.LEFT_FOOT_INDEX.value,
-            'RFOOT': mp_pose.PoseLandmark.RIGHT_FOOT_INDEX.value,
-            'LHEEL': mp_pose.PoseLandmark.LEFT_HEEL.value,
-            'RHEEL': mp_pose.PoseLandmark.RIGHT_HEEL.value,
-            'LANKLE': mp_pose.PoseLandmark.LEFT_ANKLE.value,
-            'RANKLE': mp_pose.PoseLandmark.RIGHT_ANKLE.value,
-
-            # Knees
-            'LKNEE': mp_pose.PoseLandmark.LEFT_KNEE.value,
-            'RKNEE': mp_pose.PoseLandmark.RIGHT_KNEE.value,
-
-            # Hips / pelvis
-            'LHIP': mp_pose.PoseLandmark.LEFT_HIP.value,
-            'RHIP': mp_pose.PoseLandmark.RIGHT_HIP.value,
-
-            # Shoulders
-            'LSHOULDER': mp_pose.PoseLandmark.LEFT_SHOULDER.value,
-            'RSHOULDER': mp_pose.PoseLandmark.RIGHT_SHOULDER.value,
-
-            # Head / alignment
-            'LEAR': mp_pose.PoseLandmark.LEFT_EAR.value,
-            'REAR': mp_pose.PoseLandmark.RIGHT_EAR.value,
-            'NOSE': mp_pose.PoseLandmark.NOSE.value,
-
-            # Wrists (optional)
-            'LWRIST': mp_pose.PoseLandmark.LEFT_WRIST.value,
-            'RWRIST': mp_pose.PoseLandmark.RIGHT_WRIST.value
-        }
+        neededLandmarks = getLandmarks()
 
         for i, landmark in neededLandmarks.items():
             drawvisibility(frame, landmark, last_bodyresult.pose_landmarks.landmark, w, h, i) 
     
     # I NEED TO CALCULATE 7 ANGLES FOR MAXIMUM SQUAT EFFICIENCY
-
-    CalculatePoints = {
-        'L_KNEE': (neededLandmarks['LKNEE'], neededLandmarks['LHIP'], neededLandmarks['LANKLE']),
-        'R_KNEE': (neededLandmarks['RKNEE'], neededLandmarks['RHIP'], neededLandmarks['RANKLE']),
-        'L_DORSIFLEX': (neededLandmarks['LANKLE'], neededLandmarks['LFOOT'], neededLandmarks['LKNEE']),
-        'R_DORSIFLEX': (neededLandmarks['RANKLE'], neededLandmarks['RFOOT'], neededLandmarks['RKNEE']),
-        'L_HIP': (neededLandmarks['LHIP'], neededLandmarks['LSHOULDER'], neededLandmarks['LKNEE']),
-        'R_HIP': (neededLandmarks['RHIP'], neededLandmarks['RSHOULDER'], neededLandmarks['RKNEE']),
-    }
-
-    Angles = {}
-    for key, point in CalculatePoints.items():
-        angle = int(calculateangle3p((point[0]), point[1], point[2], lm))
-        Angles[key] = angle, point[0]
-
-        if key == 'L_DORSIFLEX':
-            Angles[key] = abs(angle - 90), point[0]
-        if key == 'R_DORSIFLEX':
-            Angles[key] = abs(angle - 90), point[0]
-
-    # Calculate torso lean (dot product between shoulder vector and hip vector)
-    torso_vector_x = lm[neededLandmarks['RSHOULDER']].x - lm[neededLandmarks['RHIP']].x
-    torso_vector_y = lm[neededLandmarks['RSHOULDER']].y - lm[neededLandmarks['RHIP']].y
-    torso_vector_z = lm[neededLandmarks['RSHOULDER']].z - lm[neededLandmarks['RHIP']].z
-    v = np.array([torso_vector_x, torso_vector_y, torso_vector_z])
-    magnitude = np.linalg.norm(v)
-    v_normalize = v / magnitude
-    up_vector = np.array([0, -1, 0])
-    alignment = np.dot(v_normalize, up_vector)
-    angle = abs(int((math.acos(alignment) * (180 / math.pi))))
+    angles = CalculateAngles()
 
     
 
-    Angles['TORSO_LEAN'] = angle, neededLandmarks['RSHOULDER']
-    for key, (angle, point) in Angles.items():
-        drawAssignAngles(point, angle, frame, lm2d)
 
 
     cv2.putText(frame, f'Video: {playingindex + 1}/{len(videos)}', (10, 30),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
     cv2.imshow('Pose', frame)
-    print('hello world')
     # Handle keys
     key = cv2.waitKey(20) & 0xFF
     if key == ord('q'):
@@ -242,7 +254,7 @@ while cap.isOpened():
         cap = cv2.VideoCapture(videos[playingindex])
 
     
-
+    
 # ---------------------------
 # Cleanup
 # ---------------------------
