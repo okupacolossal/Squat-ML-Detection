@@ -188,7 +188,7 @@ def CalculateAngles():
         if key == 'R_DORSIFLEX':
             Angles[key] = abs(angle - 90), point[0]
         
-    Angles['TORSO'] = torsoLogic()
+    #Angles['TORSO'] = torsoLogic(lm)
     
     justAngles = {}
     for key, (angle, point) in Angles.items():
@@ -231,10 +231,6 @@ while cap.isOpened():
     
     # I NEED TO CALCULATE 7 ANGLES FOR MAXIMUM SQUAT EFFICIENCY
     angles = CalculateAngles()
-
-    
-
-
 
     cv2.putText(frame, f'Video: {playingindex + 1}/{len(videos)}', (10, 30),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
