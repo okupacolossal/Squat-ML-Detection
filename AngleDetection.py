@@ -1,32 +1,37 @@
+#IMPORTS
 import cv2
 import mediapipe as mp
 import math
 import os
 import numpy as np
 
-# ---------------------------
-# Setup video list
-# ---------------------------
+#WHILE LOOP VAR
+running = True
+
+#VIDEOS
 listpath = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'VideoExamples')
 videolist = os.listdir(listpath)
 videos = []
 playingindex = 0
 
+#REPS
 reps = {}
 reps_number = 0
+squat_stage = 'still'
+last_knee_angles = []
+rep_completed = False
+hit_bottom = False
 
-
-
+#JOIN VIDEOS IN THE LIST
 for i in videolist:
     fullvideo = os.path.join(listpath, i)
     videos.append(fullvideo)
 
+#CAPTURE VIDEOS
 cap = cv2.VideoCapture(videos[playingindex])
 mp_pose = mp.solutions.pose
 
-# ---------------------------
-# Initialize pose detection
-# ---------------------------
+#POSE DETECTION
 pose = mp_pose.Pose(
     static_image_mode=False,
     model_complexity=1,
@@ -35,17 +40,12 @@ pose = mp_pose.Pose(
     min_tracking_confidence=0.5
 )
 
-# ---------------------------
-# Setup window
-# ---------------------------
+#CREATE WINDOW
 cv2.namedWindow('Pose', cv2.WINDOW_NORMAL)
-#cv2.resizeWindow('Pose', 900, 600)
 
 
-# ---------------------------
-# Utility functions
-# ---------------------------
-def drawvisibility(frame, landmark, result, w, h, name):
+#FUNCTIONS
+def drawVisibility(frame, landmark, result, w, h, name):
     lm = result[landmark]
     x, y = int(lm.x * w), int(lm.y * h)
     cv2.circle(frame, (x, y), 5, (0, 0, 0), -1, lineType=cv2.LINE_AA)
@@ -81,7 +81,7 @@ def getLandmarks():
             'RWRIST': mp_pose.PoseLandmark.RIGHT_WRIST.value
     }
 
-def draw_skeleton(frame, lm2d, w, h):
+def drawSkeleton(frame, lm2d, w, h):
     # Define connections (pairs of landmarks)
     connections = [
         # Torso
@@ -124,7 +124,7 @@ def draw_skeleton(frame, lm2d, w, h):
         # Draw smooth anti-aliased line
         cv2.line(frame, (x1, y1), (x2, y2), (255, 255, 255), 3, lineType=cv2.LINE_AA)
 
-def calculateangle3p(mainpoint, point1, point2, lm):
+def calculate3PAngles(mainpoint, point1, point2, lm):
     
     mainpoint, point1, point2 = lm[mainpoint], lm[point1], lm[point2]
     dir1 = (
@@ -169,7 +169,7 @@ def torsoLogic(neededLandmarks):
     torsoy = (((lm2d[neededLandmarks['RSHOULDER']].y + (lm2d[neededLandmarks['LSHOULDER']].y)) / 2) * h)
     return torsoangle, (torsox, torsoy)
 
-def CalculateAngles():
+def calcAngles():
     CalculatePoints = {
         'L_KNEE': (neededLandmarks['LKNEE'], neededLandmarks['LHIP'], neededLandmarks['LANKLE']),
         'R_KNEE': (neededLandmarks['RKNEE'], neededLandmarks['RHIP'], neededLandmarks['RANKLE']),
@@ -180,7 +180,7 @@ def CalculateAngles():
     }
     Angles = {}
     for key, point in CalculatePoints.items():
-        angle = int(calculateangle3p((point[0]), point[1], point[2], lm))
+        angle = int(calculate3PAngles((point[0]), point[1], point[2], lm))
         Angles[key] = angle, point[0]
 
         if key == 'L_DORSIFLEX':
@@ -195,51 +195,83 @@ def CalculateAngles():
         drawAssignAngles(point, angle, frame, lm2d)
         justAngles[key] = angle
     return justAngles
+
+def checkState(angles):
     
-# ---------------------------
-# Main loop
-# ---------------------------
-last_bodyresult = None
-
-while cap.isOpened():
-    ret, frame = cap.read()
-    #frame = cv2.resize(frame, (900, 600))
-
-    if not ret:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-        continue
-
-    h, w, _ = frame.shape
-
-    # Process pose detection
-    bodyresult = pose.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-    if bodyresult.pose_world_landmarks:
-        last_bodyresult = bodyresult
-
-    if last_bodyresult and last_bodyresult.pose_world_landmarks:
-        lm = last_bodyresult.pose_world_landmarks.landmark
-        lm2d = last_bodyresult.pose_landmarks.landmark
-
-        # Draw skeleton lines
-        draw_skeleton(frame, lm2d, w, h)
-
-        # Draw visible landmark dots
-        neededLandmarks = getLandmarks()
-
-        for i, landmark in neededLandmarks.items():
-            drawvisibility(frame, landmark, last_bodyresult.pose_landmarks.landmark, w, h, i) 
+    global hit_bottom, rep_counted, reps_number
     
-    # I NEED TO CALCULATE 7 ANGLES FOR MAXIMUM SQUAT EFFICIENCY
-    angles = CalculateAngles()
+    # Initialize storage for current rep if needed
+    if reps_number not in reps:
+        reps[reps_number] = {}
+    
+    # Store angle data
+    for name, angle in angles.items():
+        if name not in reps[reps_number]:
+            reps[reps_number][name] = []
+        reps[reps_number][name].append(angle)
+    
+    # Determine current movement stage
+    ss = None
+    if last_knee_angles:
+        if angles['L_KNEE'] > max(last_knee_angles) + 3:
+            # Knee angle increasing = descending into squat
+            ss = 'descending'
+            # Reset flags when starting a new descent (only if previous rep was fully completed)
+            if hit_bottom and rep_counted:
+                hit_bottom = False
+                rep_counted = False
+                print(f'Starting new rep {reps_number}')
+        elif angles['L_KNEE'] < min(last_knee_angles) - 3:
+            # Knee angle decreasing = ascending from squat
+            if not hit_bottom:
+                ss = 'ascending'
+                hit_bottom = True
+                print(f'Rep {reps_number}: Hit the bottom')
+            else:
+                ss = 'ascending'
+        elif max(last_knee_angles) - min(last_knee_angles) <= 6:
+            ss = 'still'
+    
+    # Update knee angle history
+    last_knee_angles.append(angles['L_KNEE'])
+    if len(last_knee_angles) > 10:
+        last_knee_angles.pop(0)
+    
+    # Count rep when returning near starting position
+    if (hit_bottom and 
+        not rep_counted and 
+        ss == 'ascending' and
+        len(reps[reps_number]['L_KNEE']) > 20):
+        
+        # Get starting angle (average of first 15 frames)
+        starting_angles = reps[reps_number]['L_KNEE'][:15]
+        avg_starting_angle = sum(starting_angles) / len(starting_angles)
+        
+        # Check if we're back near starting position
+        if angles['L_KNEE'] >= avg_starting_angle - 15:
+            print(f'✓ REP {reps_number + 1} COMPLETED!')
+            reps_number += 1
+            rep_counted = True
 
+def drawHUD():
+    global running, playingindex, cap  # allow modifying these g
+
+    # Display current video and squat stage
     cv2.putText(frame, f'Video: {playingindex + 1}/{len(videos)}', (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+    
+    cv2.putText(frame, squat_stage, (10, 50),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+    
+    cv2.putText(frame, str(reps_number), (10, 70),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
     cv2.imshow('Pose', frame)
-    # Handle keys
+
+    # Handle key presses
     key = cv2.waitKey(20) & 0xFF
     if key == ord('q'):
-        break
+        running = False  # exit main loop
     elif key == ord('d'):
         playingindex = (playingindex + 1) % len(videos)
         cap.release()
@@ -249,8 +281,45 @@ while cap.isOpened():
         cap.release()
         cap = cv2.VideoCapture(videos[playingindex])
 
+# ---------------------------
+# Main loop
+# ---------------------------
+last_bodyresult = None
+
+while cap.isOpened() and running:
+    ret, frame = cap.read()
+    #frame = cv2.resize(frame, (900, 600))
+
+    if not ret:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        continue
+
+    h, w, _ = frame.shape
+    bodyresult = pose.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+    if bodyresult.pose_world_landmarks:
+        last_bodyresult = bodyresult
+
+    if last_bodyresult and last_bodyresult.pose_world_landmarks:
+        lm = last_bodyresult.pose_world_landmarks.landmark
+        lm2d = last_bodyresult.pose_landmarks.landmark
+
+        # Draw skeleton lines
+        drawSkeleton(frame, lm2d, w, h)
+
+        # Draw visible landmark dots
+        neededLandmarks = getLandmarks()
+
+        for i, landmark in neededLandmarks.items():
+            drawVisibility(frame, landmark, last_bodyresult.pose_landmarks.landmark, w, h, i) 
+        
+        angles = calcAngles()
+        passedStage = checkState(angles)
+
+
+        
     
-    
+
+    drawHUD()
 # ---------------------------
 # Cleanup
 # ---------------------------
