@@ -4,6 +4,7 @@ import mediapipe as mp
 import math
 import os
 import numpy as np
+import time
 
 #WHILE LOOP VAR
 running = True
@@ -16,11 +17,13 @@ playingindex = 0
 
 #REPS
 reps = {}
-reps_number = 0
+reps_number = 1
+reps_angles = {}
 squat_stage = 'still'
 last_knee_angles = []
-rep_completed = False
+rep_counted = False
 hit_bottom = False
+start_time = time.time() 
 
 #JOIN VIDEOS IN THE LIST
 for i in videolist:
@@ -196,63 +199,138 @@ def calcAngles():
         justAngles[key] = angle
     return justAngles
 
+def make_intervals(time, reps_angles, interval=0.2):
+    subsplit = int(time/interval)
+    intervals = {}
+    names = set(reps_angles)
+    
+    for i in range(1, subsplit + 1, 1):
+        maxT = i * interval
+        minT = i * interval - interval
+        if maxT not in intervals:
+            intervals[maxT] = {
+                    'Angle': [],
+                    'Time': [],
+                    'State': []
+                    }
+        
+        for _, data in reps_angles.items():
+            print(_)
+            for angle, t, state in zip(data['Angle'], data['Time'], data['State']):
+                if t >= minT and t <= maxT:
+                    intervals[maxT]['Angle'].append(angle)
+                    intervals[maxT]['Time'].append(t)
+                    intervals[maxT]['State'].append(state)
+    
+    for interval, data in intervals.items():
+        
+        angles = data['Angle']
+        times = data['Time']
+
+        velocity = [(angles[i+1] - angles[i]) / (times[i+1] - times[i]) for i in range(len(angles)-1)]
+        v_times = [(times[i+1] + times[i]) / 2 for i in range(len(times)-1)]
+
+        acceleration = [(velocity[i+1] - velocity[i]) / (v_times[i+1] - v_times[i]) for i in range(len(velocity)-1)]
+        a_times = [(v_times[i+1] + v_times[i]) / 2 for i in range(len(velocity)-1)]
+
+        jerk = [(acceleration[i+1] - acceleration[i]) / (a_times[i+1] - a_times[i]) for i in range(len(acceleration)-1)]
+
+        print(max(jerk))
+        
+    return intervals
+                
+
+            
+
+
 def checkState(angles):
     
-    global hit_bottom, rep_counted, reps_number
-    
-    # Initialize storage for current rep if needed
-    if reps_number not in reps:
-        reps[reps_number] = {}
-    
-    # Store angle data
+    global reps, reps_number, reps_angles, squat_stage, hit_bottom, start_time
+    #Check if 'L_KNEE' was detected
+    if angles['L_KNEE']:
+        last_knee_angles.append(angles['L_KNEE'])
+    #Create list for angle name
     for name, angle in angles.items():
-        if name not in reps[reps_number]:
-            reps[reps_number][name] = []
-        reps[reps_number][name].append(angle)
+        if not name in reps_angles:
+             reps_angles[name] = {}
+             reps_angles[name]['Angle'] = []
+             reps_angles[name]['Time'] = []
+             reps_angles[name]['State'] = []
+        reps_angles[name]['Angle'].append(angle)
+        reps_angles[name]['Time'].append(time.time() - start_time)
+        reps_angles[name]['State'].append(squat_stage)
+    #Store variables
+
     
-    # Determine current movement stage
-    ss = None
-    if last_knee_angles:
-        if angles['L_KNEE'] > max(last_knee_angles) + 3:
-            # Knee angle increasing = descending into squat
-            ss = 'descending'
-            # Reset flags when starting a new descent (only if previous rep was fully completed)
-            if hit_bottom and rep_counted:
-                hit_bottom = False
-                rep_counted = False
-                print(f'Starting new rep {reps_number}')
-        elif angles['L_KNEE'] < min(last_knee_angles) - 3:
-            # Knee angle decreasing = ascending from squat
-            if not hit_bottom:
-                ss = 'ascending'
-                hit_bottom = True
-                print(f'Rep {reps_number}: Hit the bottom')
-            else:
-                ss = 'ascending'
-        elif max(last_knee_angles) - min(last_knee_angles) <= 6:
-            ss = 'still'
+    #Inits reps
+    if not reps_number in reps:
+        reps[reps_number] = {}
+        start_time = time.time()
     
-    # Update knee angle history
-    last_knee_angles.append(angles['L_KNEE'])
+    #If theres over 20 angles, pop the one at the first position moving the other ones down
     if len(last_knee_angles) > 10:
         last_knee_angles.pop(0)
-    
-    # Count rep when returning near starting position
-    if (hit_bottom and 
-        not rep_counted and 
-        ss == 'ascending' and
-        len(reps[reps_number]['L_KNEE']) > 20):
-        
-        # Get starting angle (average of first 15 frames)
-        starting_angles = reps[reps_number]['L_KNEE'][:15]
-        avg_starting_angle = sum(starting_angles) / len(starting_angles)
-        
-        # Check if we're back near starting position
-        if angles['L_KNEE'] >= avg_starting_angle - 15:
-            print(f'✓ REP {reps_number + 1} COMPLETED!')
-            reps_number += 1
-            rep_counted = True
 
+    
+    #Sets the stage at which the person currently is in
+    if abs(max(last_knee_angles) - min(last_knee_angles)) <= 2:
+        squat_stage = 'Still'
+    elif not squat_stage == 'Ascending' and max(last_knee_angles) - 6 > angles['L_KNEE']:
+        squat_stage = 'Ascending'
+    elif not squat_stage == 'Descending' and min(last_knee_angles) + 6 < angles['L_KNEE']:
+        squat_stage = 'Descending'
+    
+    
+    #if the the person has hit the bottom of the squat completely
+    if not hit_bottom and squat_stage == 'Ascending' and (max(last_knee_angles) < max(reps_angles['L_KNEE']['Angle'])):
+        hit_bottom = True
+        
+        reps[reps_number]['BOTTOM_LKNEE'] = angles['L_KNEE']
+        reps[reps_number]['BOTTOM_RKNEE'] = angles['R_KNEE']
+        reps[reps_number]['BOTTOM_RHIP'] = angles['R_HIP']
+        reps[reps_number]['BOTTOM_LHIP'] = angles['L_HIP']
+        reps[reps_number]['BOTTOM_TIME'] = start_time - time.time()
+    
+    
+    
+
+    #REP FINISHED
+    if hit_bottom == True and squat_stage == 'Still' and abs((min(reps_angles['L_KNEE']['Angle']) - angles['L_KNEE'])) <= 10:
+
+        hit_bottom = False
+
+        assymetricKnees = 0
+        assymetricHips = 0
+        for index,_ in enumerate(reps_angles['L_KNEE']):
+            if abs(reps_angles['R_KNEE']['Angle'][index] - reps_angles['L_KNEE']['Angle'][index]) >= 15:
+                assymetricKnees -= abs(reps_angles['R_KNEE']['Angle'][index] - reps_angles['L_KNEE']['Angle'][index])
+                assymetricHips -= abs(reps_angles['L_HIP']['Angle'][index] - reps_angles['R_HIP']['Angle'][index])
+        
+        reps[reps_number]['KNEE_ASSYMETRY'] = abs(round(assymetricKnees / len(reps_angles), 2))
+        reps[reps_number]['HIPS_ASSYMETRY'] = abs(round(assymetricHips / len(reps_angles), 2))
+        reps[reps_number]['TIME_TAKEN'] = time.time() - start_time
+        intervals = make_intervals(int(reps[reps_number]['TIME_TAKEN']), reps_angles, 0.2)
+    
+            
+
+            
+
+        #JERK CALCULATION
+
+        # FIRST STEP: CALCULATING ANGULAR VELOCITY
+        
+        #Variável base (Posição angular), S(t) - lista de angulos articulares registrados, neste caso com o tempo AKA reps_angles['L_KNEE'] (tempo e angulo)
+        #Calcular a velocidade (1º derivada), V(t) é a taxa de variação da posição angular em relação ao tempo
+        #dividir tempo total em intervalos de tempo primeiro:
+
+        #for rep in reps_angles['L_KNEE']: 
+
+        reps_number += 1
+
+    
+
+    
+    
 def drawHUD():
     global running, playingindex, cap  # allow modifying these g
 
@@ -280,6 +358,8 @@ def drawHUD():
         playingindex = (playingindex - 1) % len(videos)
         cap.release()
         cap = cv2.VideoCapture(videos[playingindex])
+    elif key == ord('b'):
+        print(reps)
 
 # ---------------------------
 # Main loop
@@ -316,7 +396,7 @@ while cap.isOpened() and running:
         passedStage = checkState(angles)
 
 
-        
+    
     
 
     drawHUD()
