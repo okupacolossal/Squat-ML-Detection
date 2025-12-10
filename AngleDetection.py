@@ -23,7 +23,9 @@ squat_stage = 'still'
 last_knee_angles = []
 rep_counted = False
 hit_bottom = False
-start_time = time.time() 
+start_time = time.time()
+
+dt = 60
 
 #JOIN VIDEOS IN THE LIST
 for i in videolist:
@@ -200,9 +202,10 @@ def calcAngles():
     return justAngles
 
 def make_intervals(time, reps_angles, interval=0.2):
+
     subsplit = int(time/interval)
     intervals = {}
-    names = set(reps_angles)
+    tjerk = []
     
     for i in range(1, subsplit + 1, 1):
         maxT = i * interval
@@ -213,30 +216,28 @@ def make_intervals(time, reps_angles, interval=0.2):
                     'Time': [],
                     'State': []
                     }
-        
-        for _, data in reps_angles.items():
-            print(_)
-            for angle, t, state in zip(data['Angle'], data['Time'], data['State']):
-                if t >= minT and t <= maxT:
-                    intervals[maxT]['Angle'].append(angle)
-                    intervals[maxT]['Time'].append(t)
-                    intervals[maxT]['State'].append(state)
+        data = reps_angles['L_KNEE']
+        for angle, t, state in zip(data['Angle'], data['Time'], data['State']):
+            if t >= minT and t <= maxT:
+                print('added to interval',maxT)
+                intervals[maxT]['Angle'].append(angle)
+                intervals[maxT]['Time'].append(t)
+                intervals[maxT]['State'].append(state)
     
     for interval, data in intervals.items():
         
         angles = data['Angle']
         times = data['Time']
 
-        velocity = [(angles[i+1] - angles[i]) / (times[i+1] - times[i]) for i in range(len(angles)-1)]
+        velocity = [(angles[i+1] - angles[i]) / dt for i in range(len(angles)-1)]
         v_times = [(times[i+1] + times[i]) / 2 for i in range(len(times)-1)]
 
-        acceleration = [(velocity[i+1] - velocity[i]) / (v_times[i+1] - v_times[i]) for i in range(len(velocity)-1)]
+        acceleration = [(velocity[i+1] - velocity[i]) / dt for i in range(len(velocity)-1)]
         a_times = [(v_times[i+1] + v_times[i]) / 2 for i in range(len(velocity)-1)]
 
-        jerk = [(acceleration[i+1] - acceleration[i]) / (a_times[i+1] - a_times[i]) for i in range(len(acceleration)-1)]
-
-        print(max(jerk))
-        
+        jerk = [(acceleration[i+1] - acceleration[i]) / dt for i in range(len(acceleration)-1)]
+        tjerk.append(jerk)
+    
     return intervals
                 
 
