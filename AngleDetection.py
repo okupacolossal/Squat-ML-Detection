@@ -23,7 +23,9 @@ squat_stage = 'still'
 last_knee_angles = []
 rep_counted = False
 hit_bottom = False
-start_time = time.time() 
+start_time = time.time()
+
+dt = 60
 
 #JOIN VIDEOS IN THE LIST
 for i in videolist:
@@ -199,10 +201,10 @@ def calcAngles():
         justAngles[key] = angle
     return justAngles
 
-def repJerk(time, reps_angles, interval=0.2):
+def make_intervals(time, reps_angles, interval=0.2):
     subsplit = int(time/interval)
     intervals = {}
-    jerk = {}
+    names = set(reps_angles)
     
     for i in range(1, subsplit + 1, 1):
         maxT = round(i * interval, 1)
@@ -215,6 +217,7 @@ def repJerk(time, reps_angles, interval=0.2):
                     }
         
         for _, data in reps_angles.items():
+            print(_)
             for angle, t, state in zip(data['Angle'], data['Time'], data['State']):
                 if t >= minT and t <= maxT:
                     intervals[maxT]['Angle'].append(angle)
@@ -226,24 +229,18 @@ def repJerk(time, reps_angles, interval=0.2):
         angles = data['Angle']
         times = data['Time']
 
-        velocity = [(angles[i+1] - angles[i]) / (times[i+1] - times[i]) for i in range(len(angles)-1)]
+        velocity = [(angles[i+1] - angles[i]) / dt for i in range(len(angles)-1)]
         v_times = [(times[i+1] + times[i]) / 2 for i in range(len(times)-1)]
 
-        acceleration = [(velocity[i+1] - velocity[i]) / (v_times[i+1] - v_times[i]) for i in range(len(velocity)-1)]
+        acceleration = [(velocity[i+1] - velocity[i]) / dt for i in range(len(velocity)-1)]
         a_times = [(v_times[i+1] + v_times[i]) / 2 for i in range(len(velocity)-1)]
 
-        squared_diferences = []
-        average_accel = sum(acceleration) / len(acceleration)
+        jerk = [(acceleration[i+1] - acceleration[i]) / (a_times[i+1] - a_times[i]) for i in range(len(acceleration)-1)]
 
-        for accel in acceleration:
-            squared_diferences.append((accel - average_accel) ** 2)
+        print(max(jerk))
         
-        standard_deviation = math.sqrt(sum(squared_diferences) / len(squared_diferences))
-
-        normalized_accel = []
-
-        for val in acceleration:
-            normalized_accel.append((val - average_accel) / standard_deviation)
+    return intervals
+                
 
         jerktemp = ([(normalized_accel[i+1] - normalized_accel[i]) / (a_times[i+1] - a_times[i]) for i in range(len(normalized_accel)-1)])
         jerk[interval] = round(max(jerktemp), 2)
