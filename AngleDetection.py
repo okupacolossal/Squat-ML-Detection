@@ -199,13 +199,13 @@ def calcAngles():
         justAngles[key] = angle
     return justAngles
 
-def make_intervals(time, reps_angles, interval=0.2):
+def repJerk(time, reps_angles, interval=0.2):
     subsplit = int(time/interval)
     intervals = {}
-    names = set(reps_angles)
+    jerk = {}
     
     for i in range(1, subsplit + 1, 1):
-        maxT = i * interval
+        maxT = round(i * interval, 1)
         minT = i * interval - interval
         if maxT not in intervals:
             intervals[maxT] = {
@@ -215,7 +215,6 @@ def make_intervals(time, reps_angles, interval=0.2):
                     }
         
         for _, data in reps_angles.items():
-            print(_)
             for angle, t, state in zip(data['Angle'], data['Time'], data['State']):
                 if t >= minT and t <= maxT:
                     intervals[maxT]['Angle'].append(angle)
@@ -233,14 +232,23 @@ def make_intervals(time, reps_angles, interval=0.2):
         acceleration = [(velocity[i+1] - velocity[i]) / (v_times[i+1] - v_times[i]) for i in range(len(velocity)-1)]
         a_times = [(v_times[i+1] + v_times[i]) / 2 for i in range(len(velocity)-1)]
 
-        jerk = [(acceleration[i+1] - acceleration[i]) / (a_times[i+1] - a_times[i]) for i in range(len(acceleration)-1)]
+        squared_diferences = []
+        average_accel = sum(acceleration) / len(acceleration)
 
-        print(max(jerk))
+        for accel in acceleration:
+            squared_diferences.append((accel - average_accel) ** 2)
         
-    return intervals
-                
+        standard_deviation = math.sqrt(sum(squared_diferences) / len(squared_diferences))
 
-            
+        normalized_accel = []
+
+        for val in acceleration:
+            normalized_accel.append((val - average_accel) / standard_deviation)
+
+        jerktemp = ([(normalized_accel[i+1] - normalized_accel[i]) / (a_times[i+1] - a_times[i]) for i in range(len(normalized_accel)-1)])
+        jerk[interval] = round(max(jerktemp), 2)
+
+    return jerk
 
 
 def checkState(angles):
@@ -309,8 +317,8 @@ def checkState(angles):
         reps[reps_number]['KNEE_ASSYMETRY'] = abs(round(assymetricKnees / len(reps_angles), 2))
         reps[reps_number]['HIPS_ASSYMETRY'] = abs(round(assymetricHips / len(reps_angles), 2))
         reps[reps_number]['TIME_TAKEN'] = time.time() - start_time
-        intervals = make_intervals(int(reps[reps_number]['TIME_TAKEN']), reps_angles, 0.2)
-    
+        reps[reps_number]['INTERVALS'] = repJerk(int(reps[reps_number]['TIME_TAKEN']), reps_angles, 0.2)
+        
             
 
             
