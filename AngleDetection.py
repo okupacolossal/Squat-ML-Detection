@@ -5,6 +5,7 @@ import math
 import os
 import numpy as np
 import time
+from scipy.signal import savgol_filter
 
 #WHILE LOOP VAR
 running = True
@@ -24,6 +25,10 @@ last_knee_angles = []
 rep_counted = False
 hit_bottom = False
 start_time = time.time() 
+
+
+jerks = []
+
 
 #JOIN VIDEOS IN THE LIST
 for i in videolist:
@@ -199,54 +204,39 @@ def calcAngles():
         justAngles[key] = angle
     return justAngles
 
-def repJerk(time, reps_angles, interval=0.2):
-    subsplit = int(time/interval)
-    intervals = {}
-    jerk = {}
-    
-    for i in range(1, subsplit + 1, 1):
-        maxT = round(i * interval, 1)
-        minT = i * interval - interval
-        if maxT not in intervals:
-            intervals[maxT] = {
-                    'Angle': [],
-                    'Time': [],
-                    'State': []
-                    }
-        
-        for _, data in reps_angles.items():
-            for angle, t, state in zip(data['Angle'], data['Time'], data['State']):
-                if t >= minT and t <= maxT:
-                    intervals[maxT]['Angle'].append(angle)
-                    intervals[maxT]['Time'].append(t)
-                    intervals[maxT]['State'].append(state)
-    
-    for interval, data in intervals.items():
-        
-        angles = data['Angle']
-        times = data['Time']
 
-        velocity = [(angles[i+1] - angles[i]) / (times[i+1] - times[i]) for i in range(len(angles)-1)]
-        v_times = [(times[i+1] + times[i]) / 2 for i in range(len(times)-1)]
+def repJerk(reps_angles, angle_name):
 
-        acceleration = [(velocity[i+1] - velocity[i]) / (v_times[i+1] - v_times[i]) for i in range(len(velocity)-1)]
-        a_times = [(v_times[i+1] + v_times[i]) / 2 for i in range(len(velocity)-1)]
+    # Extrai dados
+    angles = np.array(reps_angles[angle_name]['Angle'], dtype=float)
+    times  = np.array(reps_angles[angle_name]['Time'], dtype=float)
+    states = np.array(reps_angles[angle_name]['State'])
 
-        squared_diferences = []
-        average_accel = sum(acceleration) / len(acceleration)
+    # Filtra estados válidos
+    mask = states != 'Still'
+    anglesFiltered = angles[mask]
+    timesFiltered  = times[mask]
 
-        for accel in acceleration:
-            squared_diferences.append((accel - average_accel) ** 2)
-        
-        standard_deviation = math.sqrt(sum(squared_diferences) / len(squared_diferences))
+    if len(anglesFiltered) > 4:
+        angles = anglesFiltered[2:-2]
+        times  = timesFiltered[2:-2]
+    else:
+        angles = anglesFiltered
+        times  = timesFiltered
 
-        normalized_accel = []
+    # Calcula dt seguro
 
-        for val in acceleration:
-            normalized_accel.append((val - average_accel) / standard_deviation)
+    dt = np.mean(np.diff(times)) if len(times) > 1 else 1.0
 
-        jerktemp = ([(normalized_accel[i+1] - normalized_accel[i]) / (a_times[i+1] - a_times[i]) for i in range(len(normalized_accel)-1)])
-        jerk[interval] = round(max(jerktemp), 2)
+
+    # Calcula jerk (3ª derivada)
+    jerk = savgol_filter(
+        angles,
+        21,
+        polyorder=3,
+        deriv=3,
+        delta=dt
+    )
 
     return jerk
 
@@ -257,6 +247,8 @@ def checkState(angles):
     #Check if 'L_KNEE' was detected
     if angles['L_KNEE']:
         last_knee_angles.append(angles['L_KNEE'])
+    elif angles['R_KNEE'] and not angles['L_KNEE']:
+        last_knee_angles.append(angles['R_KNEE'])
     #Create list for angle name
     for name, angle in angles.items():
         if not name in reps_angles:
@@ -267,7 +259,6 @@ def checkState(angles):
         reps_angles[name]['Angle'].append(angle)
         reps_angles[name]['Time'].append(time.time() - start_time)
         reps_angles[name]['State'].append(squat_stage)
-    #Store variables
 
     
     #Inits reps
@@ -278,14 +269,17 @@ def checkState(angles):
     #If theres over 20 angles, pop the one at the first position moving the other ones down
     if len(last_knee_angles) > 10:
         last_knee_angles.pop(0)
+    
 
     
     #Sets the stage at which the person currently is in
-    if abs(max(last_knee_angles) - min(last_knee_angles)) <= 2:
+    if len(last_knee_angles) >= 2:
+
+     if abs(max(last_knee_angles) - min(last_knee_angles)) <= 2:
         squat_stage = 'Still'
-    elif not squat_stage == 'Ascending' and max(last_knee_angles) - 6 > angles['L_KNEE']:
+     elif not squat_stage == 'Ascending' and max(last_knee_angles) - 6 > angles['L_KNEE']:
         squat_stage = 'Ascending'
-    elif not squat_stage == 'Descending' and min(last_knee_angles) + 6 < angles['L_KNEE']:
+     elif not squat_stage == 'Descending' and min(last_knee_angles) + 6 < angles['L_KNEE']:
         squat_stage = 'Descending'
     
     
@@ -317,10 +311,20 @@ def checkState(angles):
         reps[reps_number]['KNEE_ASSYMETRY'] = abs(round(assymetricKnees / len(reps_angles), 2))
         reps[reps_number]['HIPS_ASSYMETRY'] = abs(round(assymetricHips / len(reps_angles), 2))
         reps[reps_number]['TIME_TAKEN'] = time.time() - start_time
-        reps[reps_number]['INTERVALS'] = repJerk(int(reps[reps_number]['TIME_TAKEN']), reps_angles, 0.2)
+        reps[reps_number]['L_JERK'] = repJerk(reps_angles, 'L_KNEE')
+        reps[reps_number]['R_JERK'] = repJerk(reps_angles, 'R_KNEE')
+        
+        tjerk = []
 
+        for idx,_ in enumerate(reps[reps_number]['L_JERK']):
+            tjerk.append((reps[reps_number]['L_JERK'][idx] + reps[reps_number]['R_JERK'][idx])/2)
+            
+        print('Total Jerk:',max(tjerk))
         reps_number += 1
+        reps_angles = {}
 
+
+    
     
 
     
@@ -336,7 +340,7 @@ def drawHUD():
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
     
     cv2.putText(frame, str(reps_number), (10, 70),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2) 
 
     cv2.imshow('Pose', frame)
 
@@ -389,7 +393,7 @@ while cap.isOpened() and running:
         angles = calcAngles()
         passedStage = checkState(angles)
 
-
+  
     
     
 
