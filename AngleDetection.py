@@ -6,6 +6,7 @@ import os
 import numpy as np
 import time
 from scipy.signal import savgol_filter
+import pandas as pd
 
 #WHILE LOOP VAR
 running = True
@@ -15,6 +16,7 @@ listpath = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'VideoExampl
 videolist = os.listdir(listpath)
 videos = []
 playingindex = 0
+show_black_screen = False
 
 #REPS
 reps = {}
@@ -319,7 +321,7 @@ def checkState(angles):
         for idx,_ in enumerate(reps[reps_number]['L_JERK']):
             tjerk.append((reps[reps_number]['L_JERK'][idx] + reps[reps_number]['R_JERK'][idx])/2)
             
-        print('Total Jerk:',max(tjerk))
+        reps[reps_number]['JERK'] = max(tjerk)
         reps_number += 1
         reps_angles = {}
 
@@ -330,7 +332,7 @@ def checkState(angles):
     
     
 def drawHUD():
-    global running, playingindex, cap  # allow modifying these g
+    global running, playingindex, cap, show_black_screen  # allow modifying these g
 
     # Display current video and squat stage
     cv2.putText(frame, f'Video: {playingindex + 1}/{len(videos)}', (10, 30),
@@ -356,8 +358,8 @@ def drawHUD():
         playingindex = (playingindex - 1) % len(videos)
         cap.release()
         cap = cv2.VideoCapture(videos[playingindex])
-    elif key == ord('b'):
-        print(reps)
+    elif key == ord('f'):
+        show_black_screen = not show_black_screen
 
 # ---------------------------
 # Main loop
@@ -366,6 +368,19 @@ last_bodyresult = None
 
 while cap.isOpened() and running:
     ret, frame = cap.read()
+    
+    if show_black_screen:
+        frame = np.zeros((h, w, 3), dtype = np.uint8)
+        cv2.imshow('Pose', frame)
+
+        key = cv2.waitKey(20) & 0xFF
+        if key == ord('q'):
+           running = False
+        elif key == ord('f'):
+           show_black_screen = False
+           cap = cv2.VideoCapture(videos[playingindex])
+        continue
+
     #frame = cv2.resize(frame, (900, 600))
 
     if not ret:
