@@ -313,13 +313,13 @@ def checkState(angles):
         reps[reps_number]['KNEE_ASSYMETRY'] = abs(round(assymetricKnees / len(reps_angles), 2))
         reps[reps_number]['HIPS_ASSYMETRY'] = abs(round(assymetricHips / len(reps_angles), 2))
         reps[reps_number]['TIME_TAKEN'] = time.time() - start_time
-        reps[reps_number]['L_JERK'] = repJerk(reps_angles, 'L_KNEE')
-        reps[reps_number]['R_JERK'] = repJerk(reps_angles, 'R_KNEE')
+        ljerk = repJerk(reps_angles, 'L_KNEE')
+        rjerk = repJerk(reps_angles, 'R_KNEE')
         
         tjerk = []
 
-        for idx,_ in enumerate(reps[reps_number]['L_JERK']):
-            tjerk.append((reps[reps_number]['L_JERK'][idx] + reps[reps_number]['R_JERK'][idx])/2)
+        for idx,_ in enumerate(ljerk):
+            tjerk.append((ljerk[idx] + rjerk[idx])/2)
             
         reps[reps_number]['JERK'] = max(tjerk)
         reps_number += 1
