@@ -7,415 +7,402 @@ import numpy as np
 import time
 from scipy.signal import savgol_filter
 import pandas as pd
+from collections import deque
+import pandas as pd
+from sklearn.linear_model import LinearRegression
+import pickle
 
 #WHILE LOOP VAR
 running = True
 
-#VIDEOS
-listpath = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'VideoExamples')
-videolist = os.listdir(listpath)
-videos = []
-playingindex = 0
-show_black_screen = False
+def train_grading_model(csv_path='data.csv'):
+    """
+    Train a linear regression model on your rep dataset
+    """
+    # Load the dataset
+    df = pd.read_csv(csv_path)
+    
+    # Features (X) and target (y)
+    features = ['start_angle', 'bottom_angle', 'end_angle', 'descent_time', 'ascent_time', 'depth', 'velocity_smoothness']
+    X = df[features]
+    y = df['rank']
+    
+    # Train the model
+    model = LinearRegression()
+    model.fit(X, y)
+    
+    # Save the model
+    with open('rep_grading_model.pkl', 'wb') as f:
+        pickle.dump(model, f)
+    
+    print("Model trained and saved!")
+    print(f"Model R² score: {model.score(X, y):.4f}")
+    
+    return model
 
-#REPS
-reps = {}
-reps_number = 1
-reps_angles = {}
-squat_stage = 'still'
-last_knee_angles = []
-rep_counted = False
-hit_bottom = False
-start_time = time.time() 
+# Train once at startup
+grading_model = train_grading_model()
+
+class Session: 
+    def __init__(self):
+        self.reps = {}
+        self.reps_number = 0
+        self.reps_angles = {}
+
+        self.list_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'VideoExamples')
+        
+        # Check if directory exists
+        if not os.path.exists(self.list_path):
+            print(f"Error: Directory '{self.list_path}' not found!")
+            self.videos = []
+            self.video_list = []
+        else:
+            self.video_list = os.listdir(self.list_path)
+            self.videos = [os.path.join(self.list_path, video) for video in self.video_list]
+        
+        self.index = 0
+
+        if self.videos:
+            self.cap = cv2.VideoCapture(self.videos[self.index])
+            if not self.cap.isOpened():
+                print(f"Error: Could not open video {self.videos[self.index]}")
+        else:
+            print("No videos found in VideoExamples directory")
+            self.cap = None
+        
+        self.fps = 16
+        self.running = True
+        cv2.namedWindow('Pose', cv2.WINDOW_NORMAL)
+
+        self.mp_pose = mp.solutions.pose
+        self.pose = self.mp_pose.Pose(
+            static_image_mode=False,
+            model_complexity=1,
+            smooth_landmarks=True,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5
+        )
+        
+        self.last_bodyresult = None
+        self.frame_count = 0
+
+        self.current_rep = self.new_rep()
+        
+    def clean_up(self):
+        if self.cap:
+            self.cap.release()
+        cv2.destroyAllWindows()
+        self.pose.close()
+    
+    def next_video(self):
+        """Switch to next video in the list"""
+        if self.videos:
+            self.index = (self.index + 1) % len(self.videos)
+            if self.cap:
+                self.cap.release()
+            self.cap = cv2.VideoCapture(self.videos[self.index])
+            print(f"Switched to video: {self.video_list[self.index]}")
+            self.current_rep = self.new_rep(0)
 
 
-jerks = []
+    def new_rep(self, number=1):
+        """Start a new rep"""
+        print('Initiated rep number:', self.reps_number)
+        rep = Rep(self.reps_number)
+        self.reps[self.reps_number] = rep
+        self.reps_number += number
+        return rep
+    
+    def save_reps_to_csv(self):
+        """Save all completed reps to CSV file"""
+        data = []
+        for rep_num, rep in self.reps.items():
+            # Only save reps that have been completed (have end_time)
+            if rep.end_time is not None:
+                data.append({
+                    'rep_number': rep.rep_number,
+                    'start_angle': rep.start_angle,
+                    'bottom_angle': rep.bottom_angle,
+                    'end_angle': rep.end_angle,
+                    'descent_time': rep.descent_time,
+                    'ascent_time': rep.ascent_time,
+                    'depth': rep.depth,
+                    'velocity_smoothness': rep.velocity_smoothness
+                })
+        
+        if data:
+            df = pd.DataFrame(data)
+            filename = f'reps_data_{time.time():.0f}.csv'
+            df.to_csv(filename, index=False)
+            print(f"✓ Saved {len(data)} reps to {filename}")
+            return filename
+        else:
+            print("No completed reps to save")
+            return None
 
+class Rep:
+    def __init__(self, rep_number):
+        self.rep_number = rep_number
+        self.angles = deque(maxlen=25)
+        
+        self.start_time = None
+        self.start_angle = None
+        self.bottom_time = None
+        self.bottom_angle = None
+        self.end_time = None
+        self.end_angle = None
 
-#JOIN VIDEOS IN THE LIST
-for i in videolist:
-    fullvideo = os.path.join(listpath, i)
-    videos.append(fullvideo)
+        self.state = None # states: still, descending, ascending
+        self.still_timer = None
 
-#CAPTURE VIDEOS
-cap = cv2.VideoCapture(videos[playingindex])
-mp_pose = mp.solutions.pose
+        self.ascent_time = None
+        self.descent_time = None
+        self.depth = None
+        self.velocity_smoothness = None
 
-#POSE DETECTION
-pose = mp_pose.Pose(
-    static_image_mode=False,
-    model_complexity=1,
-    smooth_landmarks=True,
-    min_detection_confidence=0.5,
-    min_tracking_confidence=0.5
-)
+# ---------------------------
+# Helper Functions
+# ---------------------------
 
-#CREATE WINDOW
-cv2.namedWindow('Pose', cv2.WINDOW_NORMAL)
+def grade_rep(rep, model):
 
-
-#FUNCTIONS
-def drawVisibility(frame, landmark, result, w, h, name):
-    lm = result[landmark]
-    x, y = int(lm.x * w), int(lm.y * h)
-    cv2.circle(frame, (x, y), 5, (0, 0, 0), -1, lineType=cv2.LINE_AA)
-
-def getLandmarks():
-    return {
-            'LFOOT': mp_pose.PoseLandmark.LEFT_FOOT_INDEX.value,
-            'RFOOT': mp_pose.PoseLandmark.RIGHT_FOOT_INDEX.value,
-            'LHEEL': mp_pose.PoseLandmark.LEFT_HEEL.value,
-            'RHEEL': mp_pose.PoseLandmark.RIGHT_HEEL.value,
-            'LANKLE': mp_pose.PoseLandmark.LEFT_ANKLE.value,
-            'RANKLE': mp_pose.PoseLandmark.RIGHT_ANKLE.value,
-
-            # Knees
-            'LKNEE': mp_pose.PoseLandmark.LEFT_KNEE.value,
-            'RKNEE': mp_pose.PoseLandmark.RIGHT_KNEE.value,
-
-            # Hips / pelvis
-            'LHIP': mp_pose.PoseLandmark.LEFT_HIP.value,
-            'RHIP': mp_pose.PoseLandmark.RIGHT_HIP.value,
-
-            # Shoulders
-            'LSHOULDER': mp_pose.PoseLandmark.LEFT_SHOULDER.value,
-            'RSHOULDER': mp_pose.PoseLandmark.RIGHT_SHOULDER.value,
-
-            # Head / alignment
-            'LEAR': mp_pose.PoseLandmark.LEFT_EAR.value,
-            'REAR': mp_pose.PoseLandmark.RIGHT_EAR.value,
-            'NOSE': mp_pose.PoseLandmark.NOSE.value,
-
-            # Wrists (optional)
-            'LWRIST': mp_pose.PoseLandmark.LEFT_WRIST.value,
-            'RWRIST': mp_pose.PoseLandmark.RIGHT_WRIST.value
+    features_dict = {
+        'start_angle': [rep.start_angle],
+        'bottom_angle': [rep.bottom_angle],
+        'end_angle': [rep.end_angle],
+        'descent_time': [rep.descent_time],
+        'ascent_time': [rep.ascent_time],
+        'depth': [rep.depth],
+        'velocity_smoothness': [rep.velocity_smoothness]
     }
 
-def drawSkeleton(frame, lm2d, w, h):
-    # Define connections (pairs of landmarks)
-    connections = [
-        # Torso
-        (mp_pose.PoseLandmark.LEFT_SHOULDER, mp_pose.PoseLandmark.RIGHT_SHOULDER),
-        (mp_pose.PoseLandmark.LEFT_SHOULDER, mp_pose.PoseLandmark.LEFT_HIP),
-        (mp_pose.PoseLandmark.RIGHT_SHOULDER, mp_pose.PoseLandmark.RIGHT_HIP),
-        (mp_pose.PoseLandmark.LEFT_HIP, mp_pose.PoseLandmark.RIGHT_HIP),
+    x = pd.DataFrame(features_dict)
+    grade = model.predict(x)[0]
 
-        # Arms
-        (mp_pose.PoseLandmark.LEFT_SHOULDER, mp_pose.PoseLandmark.LEFT_ELBOW),
-        (mp_pose.PoseLandmark.LEFT_ELBOW, mp_pose.PoseLandmark.LEFT_WRIST),
-        (mp_pose.PoseLandmark.RIGHT_SHOULDER, mp_pose.PoseLandmark.RIGHT_ELBOW),
-        (mp_pose.PoseLandmark.RIGHT_ELBOW, mp_pose.PoseLandmark.RIGHT_WRIST),
-
-        # Legs
-        (mp_pose.PoseLandmark.LEFT_HIP, mp_pose.PoseLandmark.LEFT_KNEE),
-        (mp_pose.PoseLandmark.LEFT_KNEE, mp_pose.PoseLandmark.LEFT_ANKLE),
-        (mp_pose.PoseLandmark.RIGHT_HIP, mp_pose.PoseLandmark.RIGHT_KNEE),
-        (mp_pose.PoseLandmark.RIGHT_KNEE, mp_pose.PoseLandmark.RIGHT_ANKLE),
-
-        # Feet
-        (mp_pose.PoseLandmark.LEFT_ANKLE, mp_pose.PoseLandmark.LEFT_HEEL),
-        (mp_pose.PoseLandmark.LEFT_HEEL, mp_pose.PoseLandmark.LEFT_FOOT_INDEX),
-        (mp_pose.PoseLandmark.RIGHT_ANKLE, mp_pose.PoseLandmark.RIGHT_HEEL),
-        (mp_pose.PoseLandmark.RIGHT_HEEL, mp_pose.PoseLandmark.RIGHT_FOOT_INDEX),
-
-        # Head
-        (mp_pose.PoseLandmark.LEFT_SHOULDER, mp_pose.PoseLandmark.LEFT_EAR),
-        (mp_pose.PoseLandmark.RIGHT_SHOULDER, mp_pose.PoseLandmark.RIGHT_EAR),
-        (mp_pose.PoseLandmark.NOSE, mp_pose.PoseLandmark.LEFT_EAR),
-        (mp_pose.PoseLandmark.NOSE, mp_pose.PoseLandmark.RIGHT_EAR)
-    ]
-
-    for start, end in connections:
-        p1 = lm2d[start.value]
-        p2 = lm2d[end.value]
-        x1, y1 = int(p1.x * w), int(p1.y * h)
-        x2, y2 = int(p2.x * w), int(p2.y * h)
-
-        # Draw smooth anti-aliased line
-        cv2.line(frame, (x1, y1), (x2, y2), (255, 255, 255), 3, lineType=cv2.LINE_AA)
-
-def calculate3PAngles(mainpoint, point1, point2, lm):
+    return grade
+def calculate_angle(a, b, c):
+    """
+    Calculate angle between three points
+    a, b, c are landmarks (each with x, y, z attributes)
+    """
+    a = np.array([a.x, a.y])
+    b = np.array([b.x, b.y])
+    c = np.array([c.x, c.y])
     
-    mainpoint, point1, point2 = lm[mainpoint], lm[point1], lm[point2]
-    dir1 = (
-        point1.x - mainpoint.x,
-        point1.y - mainpoint.y,
-        point1.z - mainpoint.z
-    )
-    dir2 = (
-        point2.x - mainpoint.x,
-        point2.y - mainpoint.y,
-        point2.z - mainpoint.z
-    )
-
-    dotproduct = dir1[0] * dir2[0] + dir1[1] * dir2[1] + dir1[2] * dir2[2]
-
-    crossproduct = np.cross(dir1, dir2)
-    magnitudedir1 = math.sqrt(dir1[0] ** 2 + dir1[1] ** 2 + dir1[2] ** 2)
-    magnitudedir2 = math.sqrt(dir2[0] ** 2 + dir2[1] ** 2 + dir2[2] ** 2)
-
-    angle = math.acos(dotproduct / (magnitudedir1 * magnitudedir2))
-    angleInDegrees = angle * (180 / math.pi)
-    flexion = 180 - angleInDegrees
-
-    return flexion
-
-def drawAssignAngles(point, angle, frame, marks):
-    x, y  = int(marks[point].x * w), int(marks[point].y * h)
-    cv2.putText(frame, f'{int(angle)}', (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 4, cv2.LINE_AA)
-    cv2.putText(frame, f'{int(angle)}', (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2, cv2.LINE_AA)
-
-def torsoLogic(neededLandmarks):
-    torso_vector_x = lm[neededLandmarks['RSHOULDER']].x - lm[neededLandmarks['RHIP']].x
-    torso_vector_y = lm[neededLandmarks['RSHOULDER']].y - lm[neededLandmarks['RHIP']].y
-    torso_vector_z = lm[neededLandmarks['RSHOULDER']].z - lm[neededLandmarks['RHIP']].z
-    torsov = np.array([torso_vector_x, torso_vector_y, torso_vector_z])
-    torsomagnitude = np.linalg.norm(torsov)
-    torso_normalize = torsov / torsomagnitude
-    torsoup_vector = np.array([0, -1, 0])
-    torsoalignment = np.dot(torso_normalize, torsoup_vector)    
-    torsoangle = int((math.acos(torsoalignment) * (180 / math.pi)))
-    torsox = (((lm2d[neededLandmarks['RSHOULDER']].x + (lm2d[neededLandmarks['LSHOULDER']].x)) / 2) * w)
-    torsoy = (((lm2d[neededLandmarks['RSHOULDER']].y + (lm2d[neededLandmarks['LSHOULDER']].y)) / 2) * h)
-    return torsoangle, (torsox, torsoy)
-
-def calcAngles():
-    CalculatePoints = {
-        'L_KNEE': (neededLandmarks['LKNEE'], neededLandmarks['LHIP'], neededLandmarks['LANKLE']),
-        'R_KNEE': (neededLandmarks['RKNEE'], neededLandmarks['RHIP'], neededLandmarks['RANKLE']),
-        'L_DORSIFLEX': (neededLandmarks['LANKLE'], neededLandmarks['LFOOT'], neededLandmarks['LKNEE']),
-        'R_DORSIFLEX': (neededLandmarks['RANKLE'], neededLandmarks['RFOOT'], neededLandmarks['RKNEE']),
-        'L_HIP': (neededLandmarks['LHIP'], neededLandmarks['LSHOULDER'], neededLandmarks['LKNEE']),
-        'R_HIP': (neededLandmarks['RHIP'], neededLandmarks['RSHOULDER'], neededLandmarks['RKNEE']),
-    }
-    Angles = {}
-    for key, point in CalculatePoints.items():
-        angle = int(calculate3PAngles((point[0]), point[1], point[2], lm))
-        Angles[key] = angle, point[0]
-
-        if key == 'L_DORSIFLEX':
-            Angles[key] = abs(angle - 90), point[0]
-        if key == 'R_DORSIFLEX':
-            Angles[key] = abs(angle - 90), point[0]
-        
-    #Angles['TORSO'] = torsoLogic(lm)
+    ba = a - b
+    bc = c - b
     
-    justAngles = {}
-    for key, (angle, point) in Angles.items():
-        drawAssignAngles(point, angle, frame, lm2d)
-        justAngles[key] = angle
-    return justAngles
-
-
-def repJerk(reps_angles, angle_name):
-
-    # Extrai dados
-    angles = np.array(reps_angles[angle_name]['Angle'], dtype=float)
-    times  = np.array(reps_angles[angle_name]['Time'], dtype=float)
-    states = np.array(reps_angles[angle_name]['State'])
-
-    # Filtra estados válidos
-    mask = states != 'Still'
-    anglesFiltered = angles[mask]
-    timesFiltered  = times[mask]
-
-    if len(anglesFiltered) > 4:
-        angles = anglesFiltered[2:-2]
-        times  = timesFiltered[2:-2]
-    else:
-        angles = anglesFiltered
-        times  = timesFiltered
-
-    # Calcula dt seguro
-
-    dt = np.mean(np.diff(times)) if len(times) > 1 else 1.0
-
-
-    # Calcula jerk (3ª derivada)
-    jerk = savgol_filter(
-        angles,
-        21,
-        polyorder=3,
-        deriv=3,
-        delta=dt
-    )
-
-    return jerk
-
-
-def checkState(angles):
+    cosine_angle = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc))
+    angle = np.arccos(np.clip(cosine_angle, -1.0, 1.0))
     
-    global reps, reps_number, reps_angles, squat_stage, hit_bottom, start_time
-    #Check if 'L_KNEE' was detected
-    if angles['L_KNEE']:
-        last_knee_angles.append(angles['L_KNEE'])
-    elif angles['R_KNEE'] and not angles['L_KNEE']:
-        last_knee_angles.append(angles['R_KNEE'])
-    #Create list for angle name
-    for name, angle in angles.items():
-        if not name in reps_angles:
-             reps_angles[name] = {}
-             reps_angles[name]['Angle'] = []
-             reps_angles[name]['Time'] = []
-             reps_angles[name]['State'] = []
-        reps_angles[name]['Angle'].append(angle)
-        reps_angles[name]['Time'].append(time.time() - start_time)
-        reps_angles[name]['State'].append(squat_stage)
+    return np.degrees(angle)
 
+def draw_landmarks(frame, landmarks, h, w, connections=None):
+    """
+    Draw landmarks and connections on frame
+    """
+    if not landmarks:
+        return frame
     
-    #Inits reps
-    if not reps_number in reps:
-        reps[reps_number] = {}
-        start_time = time.time()
-    
-    #If theres over 20 angles, pop the one at the first position moving the other ones down
-    if len(last_knee_angles) > 10:
-        last_knee_angles.pop(0)
-    
-
-    
-    #Sets the stage at which the person currently is in
-    if len(last_knee_angles) >= 2:
-
-     if abs(max(last_knee_angles) - min(last_knee_angles)) <= 2:
-        squat_stage = 'Still'
-     elif not squat_stage == 'Ascending' and max(last_knee_angles) - 6 > angles['L_KNEE']:
-        squat_stage = 'Ascending'
-     elif not squat_stage == 'Descending' and min(last_knee_angles) + 6 < angles['L_KNEE']:
-        squat_stage = 'Descending'
-    
-    
-    #if the the person has hit the bottom of the squat completely
-    if not hit_bottom and squat_stage == 'Ascending' and (max(last_knee_angles) < max(reps_angles['L_KNEE']['Angle'])):
-        hit_bottom = True
-        
-        reps[reps_number]['BOTTOM_LKNEE'] = angles['L_KNEE']
-        reps[reps_number]['BOTTOM_RKNEE'] = angles['R_KNEE']
-        reps[reps_number]['BOTTOM_RHIP'] = angles['R_HIP']
-        reps[reps_number]['BOTTOM_LHIP'] = angles['L_HIP']
-        reps[reps_number]['BOTTOM_TIME'] = start_time - time.time()
-    
-    
-    
-
-    #REP FINISHED
-    if hit_bottom == True and squat_stage == 'Still' and abs((min(reps_angles['L_KNEE']['Angle']) - angles['L_KNEE'])) <= 10:
-
-        hit_bottom = False
-
-        assymetricKnees = 0
-        assymetricHips = 0
-        for index,_ in enumerate(reps_angles['L_KNEE']):
-            if abs(reps_angles['R_KNEE']['Angle'][index] - reps_angles['L_KNEE']['Angle'][index]) >= 15:
-                assymetricKnees -= abs(reps_angles['R_KNEE']['Angle'][index] - reps_angles['L_KNEE']['Angle'][index])
-                assymetricHips -= abs(reps_angles['L_HIP']['Angle'][index] - reps_angles['R_HIP']['Angle'][index])
-        
-        reps[reps_number]['KNEE_ASSYMETRY'] = abs(round(assymetricKnees / len(reps_angles), 2))
-        reps[reps_number]['HIPS_ASSYMETRY'] = abs(round(assymetricHips / len(reps_angles), 2))
-        reps[reps_number]['TIME_TAKEN'] = time.time() - start_time
-        ljerk = repJerk(reps_angles, 'L_KNEE')
-        rjerk = repJerk(reps_angles, 'R_KNEE')
-        
-        tjerk = []
-
-        for idx,_ in enumerate(ljerk):
-            tjerk.append((ljerk[idx] + rjerk[idx])/2)
+    # Draw connections
+    if connections:
+        for connection in connections:
+            start_idx, end_idx = connection
+            start = landmarks[start_idx]
+            end = landmarks[end_idx]
             
-        reps[reps_number]['JERK'] = max(tjerk)
-        reps_number += 1
-        reps_angles = {}
-
-
+            start_pos = (int(start.x * w), int(start.y * h))
+            end_pos = (int(end.x * w), int(end.y * h))
+            
+            cv2.line(frame, start_pos, end_pos, (0, 255, 0), 2)
     
+    # Draw landmarks
+    for landmark in landmarks:
+        x = int(landmark.x * w)
+        y = int(landmark.y * h)
+        cv2.circle(frame, (x, y), 5, (0, 0, 255), -1)
     
+    return frame
 
+def put_text_with_background(frame, text, position, font=cv2.FONT_HERSHEY_SIMPLEX, 
+                            font_scale=0.7, text_color=(255, 255, 255), 
+                            bg_color=(0, 0, 0), thickness=2, padding=5):
+    """
+    Draw text with a background rectangle for visibility
+    """
+    x, y = position
     
+    # Get text size
+    text_size = cv2.getTextSize(text, font, font_scale, thickness)[0]
     
-def drawHUD():
-    global running, playingindex, cap, show_black_screen  # allow modifying these g
-
-    # Display current video and squat stage
-    cv2.putText(frame, f'Video: {playingindex + 1}/{len(videos)}', (10, 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+    # Create rectangle coordinates with padding
+    rect_x1 = x - padding
+    rect_y1 = y - text_size[1] - padding
+    rect_x2 = x + text_size[0] + padding
+    rect_y2 = y + padding
     
-    cv2.putText(frame, squat_stage, (10, 50),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+    # Draw background rectangle
+    cv2.rectangle(frame, (rect_x1, rect_y1), (rect_x2, rect_y2), bg_color, -1)
     
-    cv2.putText(frame, str(reps_number), (10, 70),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2) 
+    # Draw text
+    cv2.putText(frame, text, position, font, font_scale, text_color, thickness)
+    
+    return frame
 
-    cv2.imshow('Pose', frame)
+def average(values: list, number: float = 2):
+    return sum(values) / number
 
-    # Handle key presses
-    key = cv2.waitKey(20) & 0xFF
-    if key == ord('q'):
-        running = False  # exit main loop
-    elif key == ord('d'):
-        playingindex = (playingindex + 1) % len(videos)
-        cap.release()
-        cap = cv2.VideoCapture(videos[playingindex])
-    elif key == ord('a'):
-        playingindex = (playingindex - 1) % len(videos)
-        cap.release()
-        cap = cv2.VideoCapture(videos[playingindex])
-    elif key == ord('f'):
-        show_black_screen = not show_black_screen
+def frame_state_management(session, angle: int):
+    """
+    Manage frame state and rep counting logic
+    """
+    rep = session.current_rep
+    if len(rep.angles) >= 3:
 
+        # still logic
+        if abs(max(rep.angles) - min(rep.angles)) <= 10:
+            if not rep.still_timer:
+                rep.still_timer = time.time()
+            elif (time.time() - rep.still_timer) >= 0.2 and rep.state != 'still':
+                rep.state = 'still'
+                print('Still time started at', session.frame_count, 'while user is', rep.state)
+        # movement logic
+        else:
+            rep.still_timer = None
+            # started descending
+
+            if rep.state == 'still':
+                if angle < min(list(rep.angles)) - 6:
+                    rep.state = 'descending'
+                elif angle > max(list(rep.angles)) + 6:
+                    rep.state = 'ascending'
+
+            if not rep.start_time and angle < average(list(rep.angles)[-3:]):
+                rep.start_time = time.time()
+                rep.start_angle = angle
+                rep.state = 'descending'
+                print(f"Rep {rep.rep_number} started at frame {session.frame_count} with angle {angle}º")
+            # ascending logic, set bottom
+            elif len(rep.angles) > 10 and rep.state == 'descending' and angle > average(list(rep.angles)[-10:], 10) and angle <= 125:
+                rep.state = 'ascending'
+                rep.bottom_time = time.time()
+                rep.bottom_angle = angle
+                print(f"Rep {rep.rep_number} bottom reached at frame {session.frame_count}, {angle}º")
+    
+            if ( rep.state == 'still' and rep.bottom_time != None ) or (rep.state == 'ascending' and angle >= rep.start_angle - 5 and ( rep.state == 'still' or angle < min(rep.angles) - 3 )):
+                rep.end_time = time.time()
+                rep.end_angle = angle
+
+                rep.ascent_time = round((rep.end_time - rep.bottom_time), 2)
+                rep.descent_time = round((rep.bottom_time - rep.start_time), 2)
+                rep.depth = int(180 - rep.bottom_angle)
+                rep.velocity_smoothness = int(np.std(np.diff(rep.angles)))
+                velocity_smoothness = rep.velocity_smoothness
+                
+                print(f'---- REP {rep.rep_number} completed at frame {session.frame_count} ----')
+                print('Ascent time:', rep.ascent_time)
+                print('Descent time:', rep.descent_time)
+                print('Depth:', rep.depth)
+                print('Velocity smoothness', velocity_smoothness)
+                print('Grade:', grade_rep(rep, grading_model))
+                print('---------------------------------------------')
+
+
+                session.current_rep = session.new_rep()
+
+
+    rep.angles.append(angle)
+
+
+    pass
 # ---------------------------
 # Main loop
 # ---------------------------
-last_bodyresult = None
 
-while cap.isOpened() and running:
-    ret, frame = cap.read()
-    
-    if show_black_screen:
-        frame = np.zeros((h, w, 3), dtype = np.uint8)
-        cv2.imshow('Pose', frame)
+session = Session()
 
-        key = cv2.waitKey(20) & 0xFF
-        if key == ord('q'):
-           running = False
-        elif key == ord('f'):
-           show_black_screen = False
-           cap = cv2.VideoCapture(videos[playingindex])
-        continue
+if not session.cap or not session.cap.isOpened():
+    print("Could not initialize video capture. Exiting.")
+else:
+    while session.cap.isOpened() and session.running:
+        ret, frame = session.cap.read()
 
-    #frame = cv2.resize(frame, (900, 600))
+        if not ret:
+            print(f"Reached end of video. Looping...")
+            session.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            continue
 
-    if not ret:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-        continue
-
-    h, w, _ = frame.shape
-    bodyresult = pose.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-    if bodyresult.pose_world_landmarks:
-        last_bodyresult = bodyresult
-
-    if last_bodyresult and last_bodyresult.pose_world_landmarks:
-        lm = last_bodyresult.pose_world_landmarks.landmark
-        lm2d = last_bodyresult.pose_landmarks.landmark
-
-        # Draw skeleton lines
-        drawSkeleton(frame, lm2d, w, h)
-
-        # Draw visible landmark dots
-        neededLandmarks = getLandmarks()
-
-        for i, landmark in neededLandmarks.items():
-            drawVisibility(frame, landmark, last_bodyresult.pose_landmarks.landmark, w, h, i) 
+        h, w, _ = frame.shape
+        session.frame_count += 1
         
-        angles = calcAngles()
-        passedStage = checkState(angles)
+        # Process pose
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        bodyresult = session.pose.process(rgb_frame)
+        
+        if bodyresult.pose_world_landmarks:
+            session.last_bodyresult = bodyresult
 
-  
-    
-    
+        # Draw on frame if we have results
+        if session.last_bodyresult and session.last_bodyresult.pose_landmarks:
+            lm = session.last_bodyresult.pose_world_landmarks.landmark
+            lm2d = session.last_bodyresult.pose_landmarks.landmark
+            
+            # Draw pose skeleton
+            frame = draw_landmarks(frame, lm2d, h, w, 
+                                  mp.solutions.pose.POSE_CONNECTIONS)
+            
+            # Example: Calculate and display knee angles
+            left_knee_angle = calculate_angle(lm[23], lm[25], lm[27])  # hip, knee, ankle
+            right_knee_angle = calculate_angle(lm[24], lm[26], lm[28])
 
-    drawHUD()
+            frame_state_management(session, (round(((right_knee_angle + left_knee_angle)/2), 1)))
+            
+            frame = put_text_with_background(frame, f'L Knee: {left_knee_angle:.1f}°', (10, 30),
+                                            text_color=(0, 255, 0), bg_color=(0, 0, 0))
+            frame = put_text_with_background(frame, f'R Knee: {right_knee_angle:.1f}°', (10, 70),
+                                            text_color=(0, 255, 0), bg_color=(0, 0, 0))
+            
+            # Display squat state
+            state = session.current_rep.state
+            state_color = (255, 255, 255)  # White for 'still'
+            if state == 'descending':
+                state_color = (0, 165, 255)  # Orange
+            elif state == 'ascending':
+                state_color = (0, 255, 0)  # Green
+            
+            frame = put_text_with_background(frame, f'State: {state.upper() if state else "NEUTRAL"}', (10, 110),
+                                            font_scale=0.8, text_color=state_color, bg_color=(0, 0, 0), thickness=2)
+            frame = put_text_with_background(frame, f'Rep: {session.current_rep.rep_number}', (10, 150),
+                                            text_color=(255, 255, 0), bg_color=(0, 0, 0))
+        
+        # Display frame info
+        frame = put_text_with_background(frame, f'Frame: {session.frame_count}', (10, h - 20),
+                                        text_color=(255, 255, 0), bg_color=(0, 0, 0))
+        frame = put_text_with_background(frame, f'Video: {session.video_list[session.index] if session.video_list else "None"}', 
+                                        (10, h - 50), font_scale=0.5, text_color=(200, 200, 200), bg_color=(0, 0, 0))
+        
+        cv2.imshow('Pose', frame)
+        
+        # Handle key presses
+        key = cv2.waitKey(session.fps) & 0xFF
+        if key == ord('q'):
+            session.running = False
+            print("Quit requested")
+        elif key == ord('n'):
+            session.next_video()
+            session.frame_count = 0
+        elif key == ord('p'):
+            print("Paused - press any key to continue")
+            cv2.waitKey(0)
+        elif key == ord('s'):
+            filename = f'pose_screenshot_{time.time():.0f}.png'
+            cv2.imwrite(filename, frame)
+            print(f"Screenshot saved: {filename}")
+        elif key == ord('b'):
+            session.save_reps_to_csv()
+
 # ---------------------------
 # Cleanup
 # ---------------------------
-cap.release()
-cv2.destroyAllWindows()
-pose.close()
+session.clean_up()
+print("Session ended.")
