@@ -189,6 +189,17 @@ Add your own rows (collected via the `B` export, then manually rated) to improve
 
 ---
 
+## 💡 What I Learned
+
+- Extracting and interpreting **MediaPipe Pose landmarks** for biomechanical analysis
+- Deriving time-series metrics (velocity, depth, phase timing) from landmark sequences
+- Building a **finite-state machine** to robustly segment repetitions in noisy angle data
+- Designing a **data-collection pipeline** that feeds directly into ML training
+- Training a scikit-learn model on a small, self-collected dataset (~100 samples)
+- Understanding the full ML loop: **data capture → feature engineering → model training → inference**
+
+---
+
 ## 📄 License
 
 This project is released under the [MIT License](LICENSE).
